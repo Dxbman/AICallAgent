@@ -69,6 +69,7 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(this, com.aicallagent.app.local.LocalModelActivity.class)));
         addCallGreetingControl();
         addAiSettingsControl();
+        addVoiceTestControl();
         btnAutoReply.setOnClickListener(v -> {
             if (CallAccessibilityService.isAutoReplyEnabled() || CallAccessibilityService.isModelPreparing()) {
                 CallAccessibilityService.setAutoReplyEnabled(false);
@@ -98,6 +99,48 @@ public class MainActivity extends Activity {
         btnOpenSettings.setOnClickListener(v -> {
             Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             startActivity(intent);
+        });
+    }
+
+    // The system browser owns microphone consent. No phone-call audio is captured here.
+    private void addVoiceTestControl() {
+        Button modelButton = findViewById(R.id.btn_open_local_model);
+        if (!(modelButton.getParent() instanceof LinearLayout parent)) return;
+        Button voiceTest = new Button(this);
+        voiceTest.setText("OpenAI Voice Test / تجربة الصوت");
+        parent.addView(voiceTest, parent.indexOfChild(modelButton),
+                new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+        voiceTest.setOnClickListener(v -> {
+            if (CallAccessibilityService.isAutoReplyEnabled()
+                    || CallAccessibilityService.isModelPreparing()
+                    || Boolean.TRUE.equals(CallAccessibilityService.getSystemCallActive())) {
+                Toast.makeText(this, "أوقف الرد التلقائي وأنهِ المكالمة أولاً.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            final String origin;
+            try {
+                origin = AiServerEndpoint.normalizeOrigin(getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                        .getString("server_origin", ""));
+            } catch (IllegalArgumentException invalid) {
+                Toast.makeText(this, "أضف عنوان خادم HTTPS في AI Settings أولاً.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("تجربة صوت OpenAI")
+                    .setMessage("اختبار مستقل في المتصفح. لا تستخدمه أثناء مكالمة هاتفية. "
+                            + "سيطلب المتصفح إذن المايكروفون قبل إرسال صوتك إلى OpenAI. "
+                            + "قد تُحتسب رسوم API. تأكد من أن عنوان الخادم يعود لك.")
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton("فتح الاختبار / Open", (d, w) -> {
+                        try {
+                            startActivity(new Intent(Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(origin + "/voice-test"))
+                                    .addCategory(Intent.CATEGORY_BROWSABLE));
+                        } catch (android.content.ActivityNotFoundException unavailable) {
+                            Toast.makeText(this, "لا يوجد متصفح متاح.", Toast.LENGTH_SHORT).show();
+                        }
+                    }).show();
         });
     }
 

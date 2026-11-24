@@ -1,0 +1,23 @@
+name: Voice test checks
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'voice-test/**'
+      - '.github/workflows/voice-test-checks.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Test Worker without live API access
+        run: |
+          node --version
+          node --check voice-test/src/worker.mjs
+          node --test voice-test/test/worker.test.mjs

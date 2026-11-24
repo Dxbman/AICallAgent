@@ -1,0 +1,15 @@
+name = "ai-call-agent-voice-test"
+main = "src/worker.mjs"
+compatibility_date = "2025-04-01"
+workers_dev = true
+
+[observability]
+enabled = false
+
+# Choose a unique namespace_id in the owner account before deployment.
+[[ratelimits]]
+name = "VOICE_RATE_LIMITER"
+namespace_id = "834721"
+[ratelimits.simple]
+limit = 3
+period = 60
