@@ -27,6 +27,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
       - name: Install Android SDK
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
       - name: Run unit tests and build debug APK
