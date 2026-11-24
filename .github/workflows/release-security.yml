@@ -1,0 +1,160 @@
+name: Release security audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      sign_release:
+        description: Sign with existing private release secrets after audit passes
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'gradlew'
+      - '*.gradle'
+      - 'gradle.properties'
+      - '.github/workflows/release-security.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set up Java 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+      - name: Install required SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Test, lint and build unsigned release
+        run: bash ./gradlew --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+      - name: Resolve exact release runtime dependencies
+        run: |
+          mkdir -p audit
+          cat > "$RUNNER_TEMP/audit.init.gradle" <<'GRADLE'
+          gradle.projectsEvaluated {
+              def app = gradle.rootProject.project(':app')
+              app.tasks.register('writeReleaseAuditDependencies') {
+                  doLast {
+                      def config = app.configurations.getByName('releaseRuntimeClasspath')
+                      def modules = config.incoming.resolutionResult.allComponents
+                          .collect { it.id }
+                          .findAll { it instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier }
+                          .collect { "${it.group}:${it.module}:${it.version}" }.unique().sort()
+                      if (modules.isEmpty()) throw new GradleException('No runtime modules found; audit cannot establish coverage')
+                      def report = new File(gradle.rootProject.projectDir, 'audit/runtime-dependencies.txt')
+                      report.parentFile.mkdirs()
+                      report.text = modules.join('\n') + '\n'
+                  }
+              }
+          }
+          GRADLE
+          bash ./gradlew --no-daemon -I "$RUNNER_TEMP/audit.init.gradle" :app:writeReleaseAuditDependencies
+      - name: Check actual APK manifest and Samsung accessibility policy
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release-unsigned.apk
+          test -f "$APK"
+          apkanalyzer manifest print "$APK" > audit/manifest.xml
+          apkanalyzer manifest permissions "$APK" > audit/permissions.txt
+          apkanalyzer manifest debuggable "$APK" > audit/debuggable.txt
+          apkanalyzer files list "$APK" > audit/apk-files.txt
+          sha256sum "$APK" > audit/unsigned-sha256.txt
+          python3 - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET, zipfile
+          ns = '{http://schemas.android.com/apk/res/android}'
+          manifest = ET.parse('audit/manifest.xml').getroot()
+          app = manifest.find('application')
+          assert manifest.get('package') == 'com.aicallagent.app', 'Unexpected package'
+          permissions = {e.get(ns+'name') for e in manifest if e.tag.startswith('uses-permission')}
+          permitted = {'android.permission.INTERNET', 'android.permission.READ_PHONE_STATE'}
+          assert permissions == permitted, f'Unexpected permission set: {permissions}'
+          assert app is not None and app.get(ns+'allowBackup') == 'false', 'Backup must be disabled'
+          assert app.get(ns+'usesCleartextTraffic') == 'false', 'Cleartext traffic must be disabled'
+          assert pathlib.Path('audit/debuggable.txt').read_text().strip().lower() == 'false', 'Debuggable APK rejected'
+          service = [s for s in app.findall('service') if (s.get(ns+'name') or '').endswith('CallAccessibilityService')]
+          assert len(service) == 1 and service[0].get(ns+'permission') == 'android.permission.BIND_ACCESSIBILITY_SERVICE', 'Accessibility binding protection missing'
+          source = ET.parse('app/src/main/res/xml/accessibility_service_config.xml').getroot()
+          assert set(source.get(ns+'packageNames', '').split(',')) == {'com.samsung.android.incallui','com.samsung.android.app.telephonyui'}, 'Accessibility package scope changed'
+          code = pathlib.Path('app/src/main/java/com/aicallagent/app/CallAccessibilityService.java').read_text()
+          assert 'setServiceInfo(' not in code and 'TYPES_ALL_MASK' not in code, 'Dynamic accessibility expansion detected'
+          with zipfile.ZipFile('app/build/outputs/apk/release/app-release-unsigned.apk') as apk:
+              assert not any(n.lower().endswith('.apk') for n in apk.namelist()), 'Nested APK detected'
+          print('Release manifest and source accessibility checks passed; not a complete security certification.')
+          PY
+      - name: Check release runtime dependencies against OSV
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, urllib.request
+          deps = pathlib.Path('audit/runtime-dependencies.txt').read_text().splitlines()
+          queries = []
+          for dep in deps:
+              group, artifact, version = dep.split(':', 2)
+              queries.append({'package': {'ecosystem': 'Maven', 'name': group + ':' + artifact}, 'version': version})
+          request = urllib.request.Request('https://api.osv.dev/v1/querybatch',
+              data=json.dumps({'queries': queries}).encode(), headers={'Content-Type':'application/json'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              data = json.load(response)
+          results = data.get('results')
+          if not isinstance(results, list) or len(results) != len(queries):
+              raise SystemExit('OSV returned incomplete results; audit blocked')
+          findings = [{'dependency': dep, 'vulnerabilities': [v['id'] for v in result.get('vulns', [])],
+                       'more_results': bool(result.get('next_page_token'))} for dep, result in zip(deps, results)]
+          pathlib.Path('audit/osv-results.json').write_text(json.dumps(findings, indent=2) + '\n')
+          if any(f['vulnerabilities'] or f['more_results'] for f in findings):
+              raise SystemExit('Known vulnerability or incomplete result found; review required before signing.')
+          print('No known OSV findings for queried Maven runtime versions; native binaries and unknown vulnerabilities are not fully covered.')
+          PY
+      - name: Sign only on explicit request with existing private release credentials
+        if: github.event_name == 'workflow_dispatch' && inputs.sign_release
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_KEYSTORE_BASE64:?Configure the private signing keystore first}"
+          : "${RELEASE_STORE_PASSWORD:?Configure signing credentials first}"
+          : "${RELEASE_KEY_ALIAS:?Configure signing credentials first}"
+          : "${RELEASE_KEY_PASSWORD:?Configure signing credentials first}"
+          umask 077
+          KEYSTORE=$(mktemp "$RUNNER_TEMP/release-keystore.XXXXXX")
+          trap 'rm -f "$KEYSTORE"' EXIT
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          TOOLS="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0"
+          "$TOOLS/zipalign" -P 16 -f 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+          mkdir -p signed
+          "$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$RELEASE_KEY_ALIAS" --ks-pass env:RELEASE_STORE_PASSWORD --key-pass env:RELEASE_KEY_PASSWORD --out signed/AI-Call-Agent-release.apk "$RUNNER_TEMP/aligned.apk"
+          "$TOOLS/apksigner" verify --verbose --print-certs signed/AI-Call-Agent-release.apk > audit/signature.txt
+          sha256sum signed/AI-Call-Agent-release.apk > signed/SHA256SUMS.txt
+      - name: Upload audit reports (not the unsigned APK)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-security-reports
+          path: audit/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload signed release candidate after passing audit
+        if: github.event_name == 'workflow_dispatch' && inputs.sign_release && success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: AI-Call-Agent-release-candidate
+          path: signed/
+          if-no-files-found: error
+          retention-days: 14
