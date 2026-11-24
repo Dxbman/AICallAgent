@@ -1,7 +1,6 @@
 package com.aicallagent.app;
 
 import android.accessibilityservice.AccessibilityService;
-import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
 import android.graphics.Rect;
@@ -26,7 +25,6 @@ import com.aicallagent.app.model.ReplyDiagnostics;
 import com.aicallagent.app.model.IncomingCallGate;
 import com.aicallagent.app.model.ReplySendController;
 import com.aicallagent.app.model.CallMenuController;
-import com.aicallagent.app.model.SendEventDiagnostics;
 import com.aicallagent.app.model.InputTrace;
 import com.aicallagent.app.policy.CallPackagePolicy;
 import com.aicallagent.app.policy.SpeechBusyNotice;
@@ -89,8 +87,6 @@ public class CallAccessibilityService extends AccessibilityService {
     private AutoReplyFlow.Snapshot diagnosticScreen = new AutoReplyFlow.Snapshot();
     private String lastDiagnostic = "";
     private String lastSpeechIdentityDiagnostic = "";
-    private boolean diagnosticEventsExpanded;
-    private final SendEventDiagnostics sendEventDiagnostics = new SendEventDiagnostics();
     private final IncomingCallGate incomingCallGate = new IncomingCallGate();
     private final InputTrace inputTrace = new InputTrace(SystemClock::uptimeMillis,
             line -> Log.i(TAG, "InputTrace " + line));
@@ -203,18 +199,8 @@ public class CallAccessibilityService extends AccessibilityService {
         }
 
         CharSequence eventPkg = event.getPackageName();
-        if (diagnosticEventsExpanded && SendEventDiagnostics.shouldExpand(flow.isEnabled(), flow.getStage())) {
-            boolean knownSource = CallPackagePolicy.isAllowedPackage(eventPkg)
-                    || "com.android.systemui".contentEquals(eventPkg == null ? "" : eventPkg);
-            boolean toast = knownSource && "android.widget.Toast".contentEquals(
-                    event.getClassName() == null ? "" : event.getClassName());
-            Log.i(TAG, "SendEventTrace " + sendEventDiagnostics.record(eventPkg, event.getEventType(), toast, () -> {
-                for (CharSequence text : event.getText()) {
-                    if (SpeechBusyNotice.matchesText(text)) return true;
-                }
-                return false;
-            }));
-        }
+        // Keep the XML Samsung-only event filter for the entire service lifetime.
+        // Reject other packages before examining any event content.
         if (eventPkg == null || !isAllowedPackage(eventPkg.toString())) {
             return;
         }
@@ -282,7 +268,6 @@ public class CallAccessibilityService extends AccessibilityService {
     }
 
     private void publish() {
-        updateDiagnosticEventScope();
         autoReplyEnabled = flow.isEnabled();
         replyStage = flow.getStage();
         replyFailure = flow.getFailure();
@@ -294,32 +279,6 @@ public class CallAccessibilityService extends AccessibilityService {
         if (!diagnostic.equals(lastDiagnostic)) {
             lastDiagnostic = diagnostic;
             Log.i(TAG, "FlowDiagnostic " + diagnostic);
-        }
-    }
-
-    private void updateDiagnosticEventScope() {
-        boolean expand = Boolean.TRUE.equals(systemCallActive)
-                && SendEventDiagnostics.shouldExpand(flow.isEnabled(), flow.getStage());
-        if (expand == diagnosticEventsExpanded) return;
-        AccessibilityServiceInfo info = getServiceInfo();
-        if (info == null) {
-            diagnosticEventsExpanded = false;
-            sendEventDiagnostics.clear();
-            return;
-        }
-        info.eventTypes = expand ? AccessibilityEvent.TYPES_ALL_MASK
-                : AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-                | AccessibilityEvent.TYPE_VIEW_FOCUSED | AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED;
-        info.packageNames = expand ? null : new String[]{PKG_INCALLUI, PKG_TELEPHONYUI};
-        try {
-            setServiceInfo(info);
-            diagnosticEventsExpanded = expand;
-            sendEventDiagnostics.clear();
-            Log.i(TAG, "SendEventScope expanded=" + expand);
-        } catch (IllegalStateException | SecurityException exception) {
-            Log.i(TAG, "SendEventScope update_failed=true");
-            // On a failed scope change stop automation and let the next publish restore the filter.
-            flow.disable();
         }
     }
 
