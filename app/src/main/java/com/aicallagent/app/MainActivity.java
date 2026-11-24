@@ -11,6 +11,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.widget.Button;
+import android.widget.EditText;
+import android.text.InputFilter;
+import android.text.InputType;
 import android.widget.TextView;
 import android.widget.LinearLayout;
 import android.widget.Toast;
@@ -28,6 +31,8 @@ import com.aicallagent.app.model.AutoReplyFlow;
 public class MainActivity extends Activity {
 
     private static final String DEFAULT_CALL_GREETING = "معك المساعد الآلي، تفضل.";
+    private static final String GREETING_PREFS = "call_greeting";
+    private static final String GREETING_KEY = "text";
 
     private TextView textServiceStatus;
     private TextView textCallState;
@@ -100,19 +105,76 @@ public class MainActivity extends Activity {
         parent.addView(greetingButton, parent.indexOfChild(modelButton),
                 new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT));
-        greetingButton.setOnClickListener(v -> new AlertDialog.Builder(this)
+        greetingButton.setOnClickListener(v -> showCallGreetingEditor());
+    }
+
+    private void showCallGreetingEditor() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int padding = Math.round(20 * getResources().getDisplayMetrics().density);
+        content.setPadding(padding, padding, padding, 0);
+        TextView help = new TextView(this);
+        help.setText("عدّل الترحيب واحفظه داخل التطبيق. لتفعيله صوتياً، انسخه والصقه في Samsung Phone > Text Call > Greetings، عند التحويل من مكالمة صوتية إلى Text Call.\nSamsung Phone controls the spoken greeting.");
+        content.addView(help);
+
+        EditText editor = new EditText(this);
+        editor.setHint("ترحيب المكالمة / Call greeting");
+        editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        editor.setSingleLine(true);
+        editor.setFilters(new InputFilter[]{new InputFilter.LengthFilter(200)});
+        editor.setText(getSharedPreferences(GREETING_PREFS, MODE_PRIVATE)
+                .getString(GREETING_KEY, DEFAULT_CALL_GREETING));
+        editor.setSelectAllOnFocus(false);
+        content.addView(editor, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        Button reset = new Button(this);
+        reset.setText("استعادة الأصل / Reset");
+        reset.setOnClickListener(v -> {
+            editor.setText(DEFAULT_CALL_GREETING);
+            editor.setSelection(editor.getText().length());
+            editor.setError(null);
+        });
+        content.addView(reset);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("ترحيب المكالمة")
-                .setMessage(DEFAULT_CALL_GREETING
-                        + "\n\nانسخ العبارة والصقها في إعدادات ترحيب Text Call في تطبيق الهاتف من سامسونج، عند التحويل من المكالمة الصوتية إلى Text Call."
-                        + "\n\nSamsung Phone controls the spoken greeting. This app does not change the system setting automatically.")
+                .setView(content)
                 .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton("نسخ / Copy", (dialog, which) -> {
-                    ClipboardManager clipboard = getSystemService(ClipboardManager.class);
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Call greeting", DEFAULT_CALL_GREETING));
-                        Toast.makeText(this, "تم النسخ", Toast.LENGTH_SHORT).show();
-                    }
-                }).show());
+                .setPositiveButton("حفظ / Save", null)
+                .setNeutralButton("حفظ ونسخ / Copy", null)
+                .create();
+        dialog.setOnShowListener(unused -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                if (saveGreeting(editor, false)) dialog.dismiss();
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                if (saveGreeting(editor, true)) dialog.dismiss();
+            });
+        });
+        dialog.show();
+    }
+
+    private boolean saveGreeting(EditText editor, boolean copy) {
+        String greeting = editor.getText().toString().trim();
+        if (greeting.isEmpty()) {
+            editor.setError("اكتب الترحيب / Enter a greeting");
+            return false;
+        }
+        getSharedPreferences(GREETING_PREFS, MODE_PRIVATE).edit()
+                .putString(GREETING_KEY, greeting).apply();
+        if (copy) {
+            ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("Call greeting", greeting));
+                Toast.makeText(this, "تم الحفظ والنسخ", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "تم الحفظ، تعذر النسخ", Toast.LENGTH_SHORT).show();
+            }
+        } else {
+            Toast.makeText(this, "تم الحفظ", Toast.LENGTH_SHORT).show();
+        }
+        return true;
     }
 
     @Override
