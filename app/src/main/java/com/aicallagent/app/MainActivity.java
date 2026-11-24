@@ -4,12 +4,16 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
 import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.widget.Button;
 import android.widget.TextView;
+import android.widget.LinearLayout;
+import android.widget.Toast;
 import com.aicallagent.app.local.LocalModelRuntime;
 import com.aicallagent.app.local.LocalModelActivity;
 import java.io.IOException;
@@ -22,6 +26,8 @@ import com.aicallagent.app.model.AutoReplyFlow;
  * 접근성 서비스의 실제 연결 상태와 마지막으로 관찰된 통화 상태를 안전하게 표시합니다.
  */
 public class MainActivity extends Activity {
+
+    private static final String DEFAULT_CALL_GREETING = "معك المساعد الآلي، تفضل.";
 
     private TextView textServiceStatus;
     private TextView textCallState;
@@ -52,6 +58,7 @@ public class MainActivity extends Activity {
         textDiagnostics = findViewById(R.id.text_call_diagnostics);
         findViewById(R.id.btn_open_local_model).setOnClickListener(v ->
                 startActivity(new Intent(this, com.aicallagent.app.local.LocalModelActivity.class)));
+        addCallGreetingControl();
         btnAutoReply.setOnClickListener(v -> {
             if (CallAccessibilityService.isAutoReplyEnabled() || CallAccessibilityService.isModelPreparing()) {
                 CallAccessibilityService.setAutoReplyEnabled(false);
@@ -82,6 +89,30 @@ public class MainActivity extends Activity {
             Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             startActivity(intent);
         });
+    }
+
+    // Samsung Phone owns the spoken opening greeting; never automate settings or clipboard reads.
+    private void addCallGreetingControl() {
+        Button modelButton = findViewById(R.id.btn_open_local_model);
+        if (!(modelButton.getParent() instanceof LinearLayout parent)) return;
+        Button greetingButton = new Button(this);
+        greetingButton.setText("Call greeting / ترحيب المكالمة");
+        parent.addView(greetingButton, parent.indexOfChild(modelButton),
+                new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+        greetingButton.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("ترحيب المكالمة")
+                .setMessage(DEFAULT_CALL_GREETING
+                        + "\n\nانسخ العبارة والصقها في إعدادات ترحيب Text Call في تطبيق الهاتف من سامسونج، عند التحويل من المكالمة الصوتية إلى Text Call."
+                        + "\n\nSamsung Phone controls the spoken greeting. This app does not change the system setting automatically.")
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("نسخ / Copy", (dialog, which) -> {
+                    ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Call greeting", DEFAULT_CALL_GREETING));
+                        Toast.makeText(this, "تم النسخ", Toast.LENGTH_SHORT).show();
+                    }
+                }).show());
     }
 
     @Override
