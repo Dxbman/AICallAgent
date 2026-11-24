@@ -16,6 +16,9 @@ import android.text.InputFilter;
 import android.text.InputType;
 import android.widget.TextView;
 import android.widget.LinearLayout;
+import android.widget.RadioGroup;
+import android.widget.RadioButton;
+import android.view.View;
 import android.widget.Toast;
 import com.aicallagent.app.local.LocalModelRuntime;
 import com.aicallagent.app.local.LocalModelActivity;
@@ -33,6 +36,7 @@ public class MainActivity extends Activity {
     private static final String DEFAULT_CALL_GREETING = "معك المساعد الآلي، تفضل.";
     private static final String GREETING_PREFS = "call_greeting";
     private static final String GREETING_KEY = "text";
+    private static final String AI_PREFS = "ai_settings";
 
     private TextView textServiceStatus;
     private TextView textCallState;
@@ -64,6 +68,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.btn_open_local_model).setOnClickListener(v ->
                 startActivity(new Intent(this, com.aicallagent.app.local.LocalModelActivity.class)));
         addCallGreetingControl();
+        addAiSettingsControl();
         btnAutoReply.setOnClickListener(v -> {
             if (CallAccessibilityService.isAutoReplyEnabled() || CallAccessibilityService.isModelPreparing()) {
                 CallAccessibilityService.setAutoReplyEnabled(false);
@@ -94,6 +99,129 @@ public class MainActivity extends Activity {
             Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             startActivity(intent);
         });
+    }
+
+    private void addAiSettingsControl() {
+        Button modelButton = findViewById(R.id.btn_open_local_model);
+        if (!(modelButton.getParent() instanceof LinearLayout parent)) return;
+        Button settings = new Button(this);
+        settings.setText("AI Settings / إعدادات الذكاء الاصطناعي");
+        parent.addView(settings, parent.indexOfChild(modelButton),
+                new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+        settings.setOnClickListener(v -> showAiSettings());
+    }
+
+    // These preferences are preparation only: the call service still uses local Gemma.
+    // No call content, API keys or authentication credentials are collected here.
+    private void showAiSettings() {
+        var prefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int padding = Math.round(20 * getResources().getDisplayMetrics().density);
+        content.setPadding(padding, padding, padding, 0);
+
+        TextView notice = new TextView(this);
+        notice.setText("المحرك الفعّال حالياً: Gemma المحلي. اختر المحرك المفضل للإعداد المستقبلي. OpenAI غير مفعّل للمكالمات.\nActive engine: local Gemma. OpenAI is setup only; calls remain local.");
+        content.addView(notice);
+        RadioGroup engines = new RadioGroup(this);
+        engines.setOrientation(RadioGroup.VERTICAL);
+        RadioButton local = new RadioButton(this);
+        local.setId(View.generateViewId());
+        local.setText("Gemma — محلي / Offline");
+        RadioButton cloud = new RadioButton(this);
+        cloud.setId(View.generateViewId());
+        cloud.setText("OpenAI — إعداد مستقبلي / Setup only");
+        engines.addView(local);
+        engines.addView(cloud);
+        engines.check("openai".equals(prefs.getString("preferred_engine", "gemma"))
+                ? cloud.getId() : local.getId());
+        content.addView(engines);
+
+        EditText server = new EditText(this);
+        server.setHint("https://your-server.example");
+        server.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        server.setSingleLine(true);
+        server.setFilters(new InputFilter[]{new InputFilter.LengthFilter(2048)});
+        server.setText(prefs.getString("server_origin", ""));
+        content.addView(server, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView status = new TextView(this);
+        status.setText("اختبار الاتصال يرسل GET /health فقط إلى الخادم المحدد عبر HTTPS، دون مفتاح API أو محتوى المكالمات. لا يعني نجاحه تفعيل OpenAI.\nThe test checks server reachability only.");
+        content.addView(status);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(content);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("AI Settings / إعدادات الذكاء الاصطناعي")
+                .setView(scroll)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("حفظ / Save", null)
+                .setNeutralButton("اختبار الاتصال / Test", null)
+                .create();
+
+        dialog.setOnShowListener(unused -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                boolean wantsCloud = engines.getCheckedRadioButtonId() == cloud.getId();
+                String raw = server.getText().toString().trim();
+                String origin;
+                try {
+                    origin = raw.isEmpty() && !wantsCloud ? "" : AiServerEndpoint.normalizeOrigin(raw);
+                } catch (IllegalArgumentException invalid) {
+                    server.setError("أدخل عنوان HTTPS فقط بدون مسار أو بيانات دخول.");
+                    return;
+                }
+                prefs.edit().putString("preferred_engine", wantsCloud ? "openai" : "gemma")
+                        .putString("server_origin", origin).apply();
+                Toast.makeText(this, "تم الحفظ. المحرك الفعّال: Gemma", Toast.LENGTH_SHORT).show();
+                dialog.dismiss();
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                final String origin;
+                try {
+                    origin = AiServerEndpoint.normalizeOrigin(server.getText().toString());
+                    server.setError(null);
+                } catch (IllegalArgumentException invalid) {
+                    server.setError("أدخل عنوان HTTPS صالحاً.");
+                    return;
+                }
+                Button test = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+                test.setEnabled(false);
+                status.setText("جاري اختبار الخادم / Testing HTTPS connection");
+                new Thread(() -> {
+                    String message;
+                    javax.net.ssl.HttpsURLConnection connection = null;
+                    try {
+                        connection = (javax.net.ssl.HttpsURLConnection)
+                                AiServerEndpoint.healthUri(origin).toURL().openConnection();
+                        connection.setRequestMethod("GET");
+                        connection.setInstanceFollowRedirects(false);
+                        connection.setUseCaches(false);
+                        connection.setConnectTimeout(5000);
+                        connection.setReadTimeout(5000);
+                        int code = connection.getResponseCode();
+                        message = code >= 200 && code < 300
+                                ? "الخادم يستجيب / Server reachable: HTTP " + code
+                                    + ". OpenAI غير مفعّل للمكالمات."
+                                : "استجابة الخادم / Server response: HTTP " + code
+                                    + ". Health check unsuccessful.";
+                    } catch (java.io.IOException | RuntimeException failure) {
+                        message = "تعذّر اتصال HTTPS بالخادم / HTTPS connection failed.";
+                    } finally {
+                        if (connection != null) connection.disconnect();
+                    }
+                    final String result = message;
+                    runOnUiThread(() -> {
+                        if (dialog.isShowing() && !isFinishing() && !isDestroyed()) {
+                            status.setText(result);
+                            test.setEnabled(true);
+                        }
+                    });
+                }, "ai-health-check").start();
+            });
+        });
+        dialog.show();
     }
 
     // Samsung Phone owns the spoken opening greeting; never automate settings or clipboard reads.
